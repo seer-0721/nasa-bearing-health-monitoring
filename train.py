@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -13,11 +14,13 @@ from torch.utils.data import DataLoader
 from data import (
     CIFAR10_CLASSES,
     CIFAR10_INPUT_SIZE,
+    CIFAR10_MEAN,
+    CIFAR10_STD,
     build_cifar10_loaders,
     encode_spikes,
 )
 from model import CifarResNet, ConvLifModelSTDP, LifModelSTDP, SpikingConvLifModelSTDP
-from utils import load_stdp_params, resolve_device, save_checkpoint, set_seed
+from utils import load_checkpoint, load_stdp_params, resolve_device, save_checkpoint, set_seed
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,9 +55,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-size1", type=int, default=256)
     parser.add_argument("--hidden-size2", type=int, default=128)
     parser.add_argument("--conv-channels", type=int, default=96)
+    parser.add_argument("--conv-blocks-per-stage", type=int, default=1)
     parser.add_argument("--resnet-width", type=int, default=64)
     parser.add_argument("--resnet-blocks", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument(
+        "--readout",
+        type=str,
+        default="spike",
+        choices=["spike", "membrane", "hybrid"],
+    )
     parser.add_argument("--beta", type=float, default=0.9)
     parser.add_argument("--threshold", type=float, default=1.0)
     parser.add_argument("--stdp-current-scale", type=float, default=None)
@@ -62,6 +72,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-erasing", type=float, default=0.0)
     parser.add_argument("--label-smoothing", type=float, default=0.0)
     parser.add_argument("--mixup-alpha", type=float, default=0.0)
+    parser.add_argument("--cutmix-alpha", type=float, default=0.0)
+    parser.add_argument("--teacher-checkpoint", type=str, default=None)
+    parser.add_argument("--distill-alpha", type=float, default=0.0)
+    parser.add_argument("--distill-temperature", type=float, default=4.0)
     parser.add_argument("--amp", action="store_true")
 
     parser.add_argument("--stdp-pretrain", action="store_true")
@@ -112,8 +126,10 @@ def make_model(args: argparse.Namespace, device: torch.device) -> nn.Module:
             stdp_params=stdp_params,
             stdp_lr=args.stdp_lr,
             conv_channels=args.conv_channels,
+            conv_blocks_per_stage=args.conv_blocks_per_stage,
             stdp_current_scale=args.stdp_current_scale,
             dropout=args.dropout,
+            readout=args.readout,
         ).to(device)
     return LifModelSTDP(
             input_size=CIFAR10_INPUT_SIZE,
@@ -125,6 +141,27 @@ def make_model(args: argparse.Namespace, device: torch.device) -> nn.Module:
             stdp_params=stdp_params,
             stdp_lr=args.stdp_lr,
         ).to(device)
+
+
+def make_teacher_model(checkpoint_path: str, device: torch.device) -> nn.Module:
+    checkpoint = load_checkpoint(checkpoint_path, map_location=device)
+    train_args = checkpoint.get("args", {})
+    model_type = train_args.get("model_type")
+    if model_type != "cifar-resnet":
+        raise ValueError(
+            f"Teacher checkpoint must be cifar-resnet, got {model_type!r}: {checkpoint_path}"
+        )
+    teacher = CifarResNet(
+        num_classes=CIFAR10_CLASSES,
+        width=train_args.get("resnet_width", 64),
+        blocks_per_stage=train_args.get("resnet_blocks", 3),
+        dropout=train_args.get("dropout", 0.0),
+    ).to(device)
+    teacher.load_state_dict(checkpoint["model"])
+    teacher.eval()
+    for param in teacher.parameters():
+        param.requires_grad_(False)
+    return teacher
 
 
 def is_snn_model(args: argparse.Namespace | dict[str, object]) -> bool:
@@ -167,6 +204,47 @@ def mixup_batch(
     return mixed_images, labels, labels[indices], lam
 
 
+def cutmix_batch(
+    images: torch.Tensor,
+    labels: torch.Tensor,
+    alpha: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    if alpha <= 0:
+        return images, labels, labels, 1.0
+
+    lam = float(torch.distributions.Beta(alpha, alpha).sample().item())
+    batch_size, _, height, width = images.shape
+    indices = torch.randperm(batch_size, device=images.device)
+
+    cut_ratio = (1.0 - lam) ** 0.5
+    cut_w = int(width * cut_ratio)
+    cut_h = int(height * cut_ratio)
+    center_x = int(torch.randint(width, (1,), device=images.device).item())
+    center_y = int(torch.randint(height, (1,), device=images.device).item())
+
+    x1 = max(center_x - cut_w // 2, 0)
+    y1 = max(center_y - cut_h // 2, 0)
+    x2 = min(center_x + cut_w // 2, width)
+    y2 = min(center_y + cut_h // 2, height)
+
+    mixed_images = images.clone()
+    mixed_images[:, :, y1:y2, x1:x2] = images[indices, :, y1:y2, x1:x2]
+    lam = 1.0 - ((x2 - x1) * (y2 - y1) / float(width * height))
+    return mixed_images, labels, labels[indices], lam
+
+
+def augment_labels_batch(
+    images: torch.Tensor,
+    labels: torch.Tensor,
+    args: argparse.Namespace,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    if args.cutmix_alpha > 0:
+        return cutmix_batch(images, labels, args.cutmix_alpha)
+    if args.mixup_alpha > 0:
+        return mixup_batch(images, labels, args.mixup_alpha)
+    return images, labels, labels, 1.0
+
+
 def mixup_loss(
     criterion: nn.Module,
     logits: torch.Tensor,
@@ -177,8 +255,27 @@ def mixup_loss(
     return lam * criterion(logits, labels_a) + (1.0 - lam) * criterion(logits, labels_b)
 
 
+def normalize_for_teacher(images: torch.Tensor) -> torch.Tensor:
+    mean = torch.tensor(CIFAR10_MEAN, device=images.device, dtype=images.dtype).view(1, 3, 1, 1)
+    std = torch.tensor(CIFAR10_STD, device=images.device, dtype=images.dtype).view(1, 3, 1, 1)
+    return (images - mean) / std
+
+
+def distillation_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    temperature: float,
+) -> torch.Tensor:
+    student_log_probs = F.log_softmax(student_logits / temperature, dim=1)
+    teacher_probs = F.softmax(teacher_logits / temperature, dim=1)
+    return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (
+        temperature * temperature
+    )
+
+
 def train_epoch(
     model: nn.Module,
+    teacher_model: nn.Module | None,
     loader: DataLoader,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -196,15 +293,23 @@ def train_epoch(
     for images, labels in loader:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
-        if not is_snn_model(args) and args.mixup_alpha > 0:
-            images, labels_a, labels_b, lam = mixup_batch(images, labels, args.mixup_alpha)
-        else:
-            labels_a, labels_b, lam = labels, labels, 1.0
+        images, labels_a, labels_b, lam = augment_labels_batch(images, labels, args)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
             logits = forward_model(model, images, args)
-            loss = mixup_loss(criterion, logits, labels_a, labels_b, lam)
+            hard_loss = mixup_loss(criterion, logits, labels_a, labels_b, lam)
+            if teacher_model is not None and args.distill_alpha > 0:
+                with torch.no_grad():
+                    teacher_logits = teacher_model(normalize_for_teacher(images))
+                soft_loss = distillation_loss(
+                    logits,
+                    teacher_logits,
+                    args.distill_temperature,
+                )
+                loss = (1.0 - args.distill_alpha) * hard_loss + args.distill_alpha * soft_loss
+            else:
+                loss = hard_loss
         scaler.scale(loss).backward()
         if grad_clip > 0:
             scaler.unscale_(optimizer)
@@ -270,6 +375,11 @@ def main() -> None:
         limit_test=args.limit_test,
     )
     model = make_model(args, device)
+    teacher_model = (
+        make_teacher_model(args.teacher_checkpoint, device)
+        if args.teacher_checkpoint is not None and args.distill_alpha > 0
+        else None
+    )
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     optimizer = AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -288,6 +398,14 @@ def main() -> None:
     print(f"device={device}")
     print(f"model_type={args.model_type}")
     print(f"encoding={args.encoding if is_snn_model(args) else 'none'}")
+    print(f"readout={args.readout if args.model_type == 'spiking-conv-stdp' else 'none'}")
+    print(f"mixup_alpha={args.mixup_alpha}")
+    print(f"cutmix_alpha={args.cutmix_alpha}")
+    print(f"auto_augment={args.auto_augment}")
+    print(f"random_erasing={args.random_erasing}")
+    print(f"teacher_checkpoint={args.teacher_checkpoint}")
+    print(f"distill_alpha={args.distill_alpha}")
+    print(f"distill_temperature={args.distill_temperature}")
     print(f"normalize={normalize}")
     print(f"amp={amp_enabled}")
     print(f"stdp_params={json.dumps(stdp_params, indent=2)}")
@@ -308,6 +426,7 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         train_loss, train_acc = train_epoch(
             model,
+            teacher_model,
             train_loader,
             criterion,
             optimizer,

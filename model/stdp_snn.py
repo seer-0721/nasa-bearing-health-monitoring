@@ -287,10 +287,16 @@ class SpikingConvLifModelSTDP(nn.Module):
         dt_ms: float = 1.0,
         stdp_lr: float = 1e-6,
         conv_channels: int = 128,
+        conv_blocks_per_stage: int = 1,
         stdp_current_scale: float | None = None,
         dropout: float = 0.0,
+        readout: str = "spike",
     ) -> None:
         super().__init__()
+        if readout not in {"spike", "membrane", "hybrid"}:
+            raise ValueError(f"Unknown readout mode: {readout}")
+        if conv_blocks_per_stage < 1:
+            raise ValueError("conv_blocks_per_stage must be >= 1")
         if stdp_params is None:
             stdp_params = {
                 "A_plus": 80.0,
@@ -299,9 +305,27 @@ class SpikingConvLifModelSTDP(nn.Module):
                 "tau_minus": 20.0,
             }
 
-        self.conv1 = SpikingConvBlock(3, 32, beta=beta, threshold=threshold)
-        self.conv2 = SpikingConvBlock(32, 64, beta=beta, threshold=threshold)
-        self.conv3 = SpikingConvBlock(64, conv_channels, beta=beta, threshold=threshold)
+        stage_defs = [(3, 32, 32), (32, 64, 16), (64, conv_channels, 8)]
+        self.conv_stages = nn.ModuleList()
+        self.mem_shapes: list[tuple[int, int]] = []
+        for in_channels, out_channels, spatial_size in stage_defs:
+            blocks = nn.ModuleList()
+            for block_idx in range(conv_blocks_per_stage):
+                block_in = in_channels if block_idx == 0 else out_channels
+                pool = block_idx == conv_blocks_per_stage - 1
+                blocks.append(
+                    SpikingConvBlock(
+                        block_in,
+                        out_channels,
+                        beta=beta,
+                        threshold=threshold,
+                        pool=pool,
+                    )
+                )
+                self.mem_shapes.append((out_channels, spatial_size))
+            self.conv_stages.append(blocks)
+        self.conv_channels = conv_channels
+        self.conv_blocks_per_stage = conv_blocks_per_stage
         feature_size = conv_channels * 4 * 4
         if stdp_current_scale is None:
             stdp_current_scale = 1.0 / (feature_size**0.5)
@@ -326,6 +350,7 @@ class SpikingConvLifModelSTDP(nn.Module):
         self.hidden_size1 = hidden_size1
         self.hidden_size2 = hidden_size2
         self.output_size = output_size
+        self.readout = readout
         self.stdp_enabled = False
 
     def set_stdp(self, enabled: bool, lr_stdp: float | None = None) -> None:
@@ -337,9 +362,10 @@ class SpikingConvLifModelSTDP(nn.Module):
         batch_size, time_steps, _ = x.shape
         device = x.device
 
-        mem_c1 = torch.zeros(batch_size, 32, 32, 32, device=device)
-        mem_c2 = torch.zeros(batch_size, 64, 16, 16, device=device)
-        mem_c3 = torch.zeros(batch_size, self.conv3.out_channels, 8, 8, device=device)
+        conv_mems = [
+            torch.zeros(batch_size, channels, size, size, device=device)
+            for channels, size in self.mem_shapes
+        ]
         mem1 = torch.zeros(batch_size, self.hidden_size1, device=device)
         mem2 = torch.zeros(batch_size, self.hidden_size2, device=device)
         pre_trace = torch.zeros(batch_size, self.stdp1.in_features, device=device)
@@ -347,10 +373,12 @@ class SpikingConvLifModelSTDP(nn.Module):
 
         outputs = []
         for t in range(time_steps):
-            xt = x[:, t, :].view(batch_size, 3, 32, 32)
-            spk, mem_c1 = self.conv1(xt, mem_c1)
-            spk, mem_c2 = self.conv2(spk, mem_c2)
-            spk, mem_c3 = self.conv3(spk, mem_c3)
+            spk = x[:, t, :].view(batch_size, 3, 32, 32)
+            mem_idx = 0
+            for blocks in self.conv_stages:
+                for block in blocks:
+                    spk, conv_mems[mem_idx] = block(spk, conv_mems[mem_idx])
+                    mem_idx += 1
             features = F.adaptive_max_pool2d(spk, (4, 4)).flatten(1)
 
             i1 = self.stdp1(features)
@@ -367,6 +395,12 @@ class SpikingConvLifModelSTDP(nn.Module):
             spk1 = self.dropout(spk1)
             i2 = self.fc2(spk1)
             spk2, mem2 = self.lif2(i2, mem2)
-            outputs.append(self.fc3(spk2))
+            if self.readout == "membrane":
+                readout = mem2
+            elif self.readout == "hybrid":
+                readout = spk2 + mem2
+            else:
+                readout = spk2
+            outputs.append(self.fc3(readout))
 
         return torch.stack(outputs, dim=1).mean(dim=1)

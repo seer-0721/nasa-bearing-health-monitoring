@@ -67,8 +67,10 @@ def build_model_from_checkpoint(
             stdp_params=stdp_params,
             stdp_lr=train_args.get("stdp_lr", 1e-6),
             conv_channels=train_args.get("conv_channels", 128),
+            conv_blocks_per_stage=train_args.get("conv_blocks_per_stage", 1),
             stdp_current_scale=train_args.get("stdp_current_scale"),
             dropout=train_args.get("dropout", 0.0),
+            readout=train_args.get("readout", "spike"),
         ).to(device)
     else:
         model = LifModelSTDP(

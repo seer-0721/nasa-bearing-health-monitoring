@@ -143,6 +143,63 @@ saved_test_acc=0.7735
 reeval_test_acc=0.7739
 ```
 
+已淘汰实验：
+
+```text
+AutoAugment + RandomErasing(0.25) + CutMix(1.0)
+epoch=023 test_acc=0.1813
+
+dropout=0.2 + weight_decay=1e-3
+epoch=089 test_acc=0.7791
+
+cifar-resnet teacher distillation, alpha=0.5, T=4.0
+epoch=072 test_acc=0.7492
+```
+
+强增强对当前 SNN/STDP 训练过强，不建议继续。单纯提高 dropout/weight decay 没有带来有效提升。
+使用 94% ResNet teacher 做蒸馏也低于 baseline，当前不作为主线。
+
+## 下一轮提升实验
+
+当前实验显示：`spiking-conv-stdp` 训练准确率可到约 `90%`，但测试准确率大约在 `80%` 附近波动。
+小正则、强增强和蒸馏都没有明显解决问题。继续冲 `90%` 需要换更强的 SNN 主干，例如 spiking residual
+blocks / 更深的 multi-stage SNN，而不是继续在当前浅层 3-stage 模型上调参。
+
+如果还要在现有代码内做最后一个容量验证，可以跑每个 stage 两个 Conv-BN-LIF block 的版本：
+
+```bash
+python train.py \
+  --data-root data/cifar10 \
+  --stdp-params-file stdp_params.npz \
+  --checkpoint-dir checkpoints/spiking_conv_stdp_deep \
+  --model-type spiking-conv-stdp \
+  --augment \
+  --scheduler cosine \
+  --stdp-pretrain \
+  --stdp-epochs 2 \
+  --epochs 160 \
+  --batch-size 128 \
+  --time-steps 16 \
+  --encoding deterministic-rate \
+  --eval-repeats 1 \
+  --hidden-size1 768 \
+  --hidden-size2 384 \
+  --conv-channels 128 \
+  --conv-blocks-per-stage 2 \
+  --dropout 0.1 \
+  --readout spike \
+  --beta 0.9 \
+  --threshold 1.0 \
+  --lr 1e-3 \
+  --min-lr 1e-5 \
+  --weight-decay 5e-4 \
+  --label-smoothing 0.05 \
+  --amp \
+  --device cuda
+```
+
+如果 deep 版本仍然只在 `80%` 左右波动，就应停止当前模型族的微调，转向新的 spiking residual 主干。
+
 ## 编码方式小批次对比
 
 编码方式对 SNN + STDP 影响很大。当前 checkpoint 证据显示，`deterministic-rate` 是主线：

@@ -68,6 +68,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta", type=float, default=0.9)
     parser.add_argument("--threshold", type=float, default=1.0)
     parser.add_argument("--stdp-current-scale", type=float, default=None)
+    parser.add_argument("--stdp-ltd-scale", type=float, default=1.0)
+    parser.add_argument("--wta-k", type=int, default=0)
+    parser.add_argument("--adaptive-threshold-scale", type=float, default=0.0)
+    parser.add_argument("--adaptive-threshold-decay", type=float, default=0.9)
     parser.add_argument("--auto-augment", action="store_true")
     parser.add_argument("--random-erasing", type=float, default=0.0)
     parser.add_argument("--label-smoothing", type=float, default=0.0)
@@ -115,6 +119,7 @@ def make_model(args: argparse.Namespace, device: torch.device) -> nn.Module:
             stdp_lr=args.stdp_lr,
             conv_channels=args.conv_channels,
             stdp_current_scale=args.stdp_current_scale,
+            stdp_ltd_scale=args.stdp_ltd_scale,
         ).to(device)
     if args.model_type == "spiking-conv-stdp":
         return SpikingConvLifModelSTDP(
@@ -128,8 +133,12 @@ def make_model(args: argparse.Namespace, device: torch.device) -> nn.Module:
             conv_channels=args.conv_channels,
             conv_blocks_per_stage=args.conv_blocks_per_stage,
             stdp_current_scale=args.stdp_current_scale,
+            stdp_ltd_scale=args.stdp_ltd_scale,
             dropout=args.dropout,
             readout=args.readout,
+            wta_k=args.wta_k,
+            adaptive_threshold_scale=args.adaptive_threshold_scale,
+            adaptive_threshold_decay=args.adaptive_threshold_decay,
         ).to(device)
     return LifModelSTDP(
             input_size=CIFAR10_INPUT_SIZE,
@@ -399,6 +408,12 @@ def main() -> None:
     print(f"model_type={args.model_type}")
     print(f"encoding={args.encoding if is_snn_model(args) else 'none'}")
     print(f"readout={args.readout if args.model_type == 'spiking-conv-stdp' else 'none'}")
+    print(f"stdp_ltd_scale={args.stdp_ltd_scale if is_snn_model(args) else 'none'}")
+    print(f"wta_k={args.wta_k if args.model_type == 'spiking-conv-stdp' else 'none'}")
+    print(
+        "adaptive_threshold_scale="
+        f"{args.adaptive_threshold_scale if args.model_type == 'spiking-conv-stdp' else 'none'}"
+    )
     print(f"mixup_alpha={args.mixup_alpha}")
     print(f"cutmix_alpha={args.cutmix_alpha}")
     print(f"auto_augment={args.auto_augment}")

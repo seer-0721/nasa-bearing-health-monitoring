@@ -24,6 +24,7 @@ class STDPLayer(nn.Module):
         w_max: float = 1.0,
         lr_stdp: float = 1e-6,
         current_scale: float | None = None,
+        ltd_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.in_features = in_features
@@ -36,6 +37,7 @@ class STDPLayer(nn.Module):
         self.w_min = float(w_min)
         self.w_max = float(w_max)
         self.lr_stdp = float(lr_stdp)
+        self.ltd_scale = float(ltd_scale)
         self.current_scale = 1.0 / in_features if current_scale is None else current_scale
 
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
@@ -64,7 +66,7 @@ class STDPLayer(nn.Module):
         batch_size = max(pre_spike.shape[0], 1)
         ltp = post_spike.T @ pre_trace
         ltd = post_trace.T @ pre_spike
-        delta_w = (self.A_plus * ltp - self.A_minus * ltd) / batch_size
+        delta_w = (self.A_plus * ltp - self.A_minus * self.ltd_scale * ltd) / batch_size
 
         self.weight.add_(delta_w * self.lr_stdp * self.dt)
         self.weight.clamp_(self.w_min, self.w_max)
@@ -85,6 +87,7 @@ class LifModelSTDP(nn.Module):
         stdp_params: dict[str, float] | None = None,
         dt_ms: float = 1.0,
         stdp_lr: float = 1e-6,
+        stdp_ltd_scale: float = 1.0,
     ) -> None:
         super().__init__()
         if stdp_params is None:
@@ -104,6 +107,7 @@ class LifModelSTDP(nn.Module):
             tau_minus=stdp_params["tau_minus"],
             dt_ms=dt_ms,
             lr_stdp=stdp_lr,
+            ltd_scale=stdp_ltd_scale,
         )
         self.lif1 = snn.Leaky(beta=beta, threshold=threshold)
         self.fc2 = nn.Linear(hidden_size1, hidden_size2)
@@ -165,6 +169,7 @@ class ConvLifModelSTDP(nn.Module):
         stdp_lr: float = 1e-6,
         conv_channels: int = 96,
         stdp_current_scale: float | None = None,
+        stdp_ltd_scale: float = 1.0,
     ) -> None:
         super().__init__()
         if stdp_params is None:
@@ -202,6 +207,7 @@ class ConvLifModelSTDP(nn.Module):
             dt_ms=dt_ms,
             lr_stdp=stdp_lr,
             current_scale=stdp_current_scale,
+            ltd_scale=stdp_ltd_scale,
         )
         self.lif1 = snn.Leaky(beta=beta, threshold=threshold)
         self.fc2 = nn.Linear(hidden_size1, hidden_size2)
@@ -289,14 +295,20 @@ class SpikingConvLifModelSTDP(nn.Module):
         conv_channels: int = 128,
         conv_blocks_per_stage: int = 1,
         stdp_current_scale: float | None = None,
+        stdp_ltd_scale: float = 1.0,
         dropout: float = 0.0,
         readout: str = "spike",
+        wta_k: int = 0,
+        adaptive_threshold_scale: float = 0.0,
+        adaptive_threshold_decay: float = 0.9,
     ) -> None:
         super().__init__()
         if readout not in {"spike", "membrane", "hybrid"}:
             raise ValueError(f"Unknown readout mode: {readout}")
         if conv_blocks_per_stage < 1:
             raise ValueError("conv_blocks_per_stage must be >= 1")
+        if wta_k < 0:
+            raise ValueError("wta_k must be >= 0")
         if stdp_params is None:
             stdp_params = {
                 "A_plus": 80.0,
@@ -340,6 +352,7 @@ class SpikingConvLifModelSTDP(nn.Module):
             dt_ms=dt_ms,
             lr_stdp=stdp_lr,
             current_scale=stdp_current_scale,
+            ltd_scale=stdp_ltd_scale,
         )
         self.lif1 = snn.Leaky(beta=beta, threshold=threshold)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
@@ -351,6 +364,9 @@ class SpikingConvLifModelSTDP(nn.Module):
         self.hidden_size2 = hidden_size2
         self.output_size = output_size
         self.readout = readout
+        self.wta_k = int(wta_k)
+        self.adaptive_threshold_scale = float(adaptive_threshold_scale)
+        self.adaptive_threshold_decay = float(adaptive_threshold_decay)
         self.stdp_enabled = False
 
     def set_stdp(self, enabled: bool, lr_stdp: float | None = None) -> None:
@@ -368,6 +384,7 @@ class SpikingConvLifModelSTDP(nn.Module):
         ]
         mem1 = torch.zeros(batch_size, self.hidden_size1, device=device)
         mem2 = torch.zeros(batch_size, self.hidden_size2, device=device)
+        adaptive_threshold = torch.zeros(batch_size, self.hidden_size1, device=device)
         pre_trace = torch.zeros(batch_size, self.stdp1.in_features, device=device)
         post_trace = torch.zeros(batch_size, self.stdp1.out_features, device=device)
 
@@ -382,7 +399,17 @@ class SpikingConvLifModelSTDP(nn.Module):
             features = F.adaptive_max_pool2d(spk, (4, 4)).flatten(1)
 
             i1 = self.stdp1(features)
-            spk1, mem1 = self.lif1(i1, mem1)
+            spk1, mem1 = self.lif1(i1 - adaptive_threshold, mem1)
+            if self.wta_k > 0:
+                k = min(self.wta_k, spk1.shape[1])
+                winner_idx = i1.topk(k, dim=1).indices
+                winner_mask = torch.zeros_like(spk1).scatter(1, winner_idx, 1.0)
+                spk1 = spk1 * winner_mask
+            if self.adaptive_threshold_scale > 0:
+                adaptive_threshold = (
+                    adaptive_threshold * self.adaptive_threshold_decay
+                    + spk1.detach() * self.adaptive_threshold_scale
+                )
 
             if self.stdp_enabled:
                 pre_trace, post_trace = self.stdp1.update_stdp(

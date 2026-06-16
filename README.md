@@ -162,16 +162,24 @@ epoch=072 test_acc=0.7492
 ## 下一轮提升实验
 
 当前实验显示：`spiking-conv-stdp` 训练准确率可到约 `90%`，但测试准确率大约在 `80%` 附近波动。
-小正则、强增强和蒸馏都没有明显解决问题。继续冲 `90%` 需要换更强的 SNN 主干，例如 spiking residual
-blocks / 更深的 multi-stage SNN，而不是继续在当前浅层 3-stage 模型上调参。
+小正则、强增强和蒸馏都没有明显解决问题。下一轮优先尝试硬件 STDP 校准类方法，而不是继续做普通
+regularization。
 
-如果还要在现有代码内做最后一个容量验证，可以跑每个 stage 两个 Conv-BN-LIF block 的版本：
+### 方法 1：软件补偿 LTD
+
+器件参数中 LTP 明显强于 LTD。`--stdp-ltd-scale` 会在软件层面对 LTD 项乘一个系数：
+
+```text
+delta_w = A_plus * LTP - A_minus * stdp_ltd_scale * LTD
+```
+
+先试 `4.0`，不要一开始就和 WTA 混用：
 
 ```bash
 python train.py \
   --data-root data/cifar10 \
   --stdp-params-file stdp_params.npz \
-  --checkpoint-dir checkpoints/spiking_conv_stdp_deep \
+  --checkpoint-dir checkpoints/spiking_conv_stdp_deep_ltd4 \
   --model-type spiking-conv-stdp \
   --augment \
   --scheduler cosine \
@@ -190,6 +198,7 @@ python train.py \
   --readout spike \
   --beta 0.9 \
   --threshold 1.0 \
+  --stdp-ltd-scale 4.0 \
   --lr 1e-3 \
   --min-lr 1e-5 \
   --weight-decay 5e-4 \
@@ -198,7 +207,53 @@ python train.py \
   --device cuda
 ```
 
-如果 deep 版本仍然只在 `80%` 左右波动，就应停止当前模型族的微调，转向新的 spiking residual 主干。
+如果 `4.0` 比 baseline 好，再试 `--stdp-ltd-scale 6.0`。如果前 `30-50` epoch 明显低于 baseline，
+直接停止。
+
+### 方法 2：WTA / lateral inhibition
+
+`--wta-k` 会在 STDP hidden layer 上保留每个样本电流最高的 `k` 个 spiking neurons，近似 lateral
+inhibition。`--adaptive-threshold-scale` 会对最近发放过的 hidden neurons 增加临时阈值，避免少数神经元
+长期垄断。
+
+先试一个温和配置：
+
+```bash
+python train.py \
+  --data-root data/cifar10 \
+  --stdp-params-file stdp_params.npz \
+  --checkpoint-dir checkpoints/spiking_conv_stdp_deep_wta64 \
+  --model-type spiking-conv-stdp \
+  --augment \
+  --scheduler cosine \
+  --stdp-pretrain \
+  --stdp-epochs 2 \
+  --epochs 160 \
+  --batch-size 128 \
+  --time-steps 16 \
+  --encoding deterministic-rate \
+  --eval-repeats 1 \
+  --hidden-size1 768 \
+  --hidden-size2 384 \
+  --conv-channels 128 \
+  --conv-blocks-per-stage 2 \
+  --dropout 0.1 \
+  --readout spike \
+  --wta-k 64 \
+  --adaptive-threshold-scale 0.2 \
+  --adaptive-threshold-decay 0.9 \
+  --beta 0.9 \
+  --threshold 1.0 \
+  --lr 1e-3 \
+  --min-lr 1e-5 \
+  --weight-decay 5e-4 \
+  --label-smoothing 0.05 \
+  --amp \
+  --device cuda
+```
+
+如果 WTA 版起步太慢或 test accuracy 掉到随机附近，把 `--wta-k` 放宽到 `128`，或者先去掉
+`--adaptive-threshold-scale`。
 
 ## 编码方式小批次对比
 

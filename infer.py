@@ -78,6 +78,7 @@ def main() -> None:
             stdp_lr=train_args.get("stdp_lr", 1e-6),
             conv_channels=train_args.get("conv_channels", 96),
             stdp_current_scale=train_args.get("stdp_current_scale"),
+            stdp_ltd_scale=train_args.get("stdp_ltd_scale", 1.0),
         ).to(device)
     elif model_type == "spiking-conv-stdp":
         model = SpikingConvLifModelSTDP(
@@ -91,8 +92,12 @@ def main() -> None:
             conv_channels=train_args.get("conv_channels", 128),
             conv_blocks_per_stage=train_args.get("conv_blocks_per_stage", 1),
             stdp_current_scale=train_args.get("stdp_current_scale"),
+            stdp_ltd_scale=train_args.get("stdp_ltd_scale", 1.0),
             dropout=train_args.get("dropout", 0.0),
             readout=train_args.get("readout", "spike"),
+            wta_k=train_args.get("wta_k", 0),
+            adaptive_threshold_scale=train_args.get("adaptive_threshold_scale", 0.0),
+            adaptive_threshold_decay=train_args.get("adaptive_threshold_decay", 0.9),
         ).to(device)
     else:
         model = LifModelSTDP(

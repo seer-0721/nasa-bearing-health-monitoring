@@ -4,7 +4,7 @@
 训练时必须读取当前目录下的 `stdp_params.npz`。这是本项目的硬性要求；
 如果文件不存在，程序会直接报错，不会自动改用其他参数文件。
 
-当前稳定版本使用 `conv-stdp` 模型，在 CIFAR-10 测试集上约为 `66%` 准确率：
+当前稳定 STDP 版本使用 `conv-stdp` 模型，在 CIFAR-10 测试集上约为 `66%` 准确率：
 
 ```text
 checkpoint=checkpoints/conv_stdp/best.pt
@@ -83,7 +83,258 @@ python tools/extract_stdp_params.py --output stdp_params.npz --plot
 当前项目状态下不建议重新拟合，除非器件数据或拟合方法发生变化。训练、评估和推理命令都应显式传入
 `--stdp-params-file stdp_params.npz`。
 
-## 训练
+## 推荐的 SNN + STDP 训练
+
+如果任务要求必须使用 SNN + STDP，优先使用 `spiking-conv-stdp`。这个模型保留 CIFAR-10 的脉冲
+输入编码，卷积特征提取也使用 LIF 放电，然后接入器件参数控制的 STDP synapse 和 LIF 分类头。
+它比旧的 `conv-stdp` 更符合脉冲网络约束，也比 MLP/浅卷积基线有更大的容量。
+
+```bash
+python train.py \
+  --data-root data/cifar10 \
+  --stdp-params-file stdp_params.npz \
+  --checkpoint-dir checkpoints/spiking_conv_stdp_deterministic \
+  --model-type spiking-conv-stdp \
+  --augment \
+  --scheduler cosine \
+  --stdp-pretrain \
+  --stdp-epochs 2 \
+  --epochs 160 \
+  --batch-size 128 \
+  --time-steps 16 \
+  --encoding deterministic-rate \
+  --eval-repeats 1 \
+  --hidden-size1 768 \
+  --hidden-size2 384 \
+  --conv-channels 128 \
+  --dropout 0.1 \
+  --beta 0.9 \
+  --threshold 1.0 \
+  --lr 1e-3 \
+  --min-lr 1e-5 \
+  --weight-decay 5e-4 \
+  --label-smoothing 0.05 \
+  --amp \
+  --device cuda
+```
+
+评估：
+
+```bash
+python eval.py \
+  --checkpoint checkpoints/spiking_conv_stdp_deterministic/best.pt \
+  --data-root data/cifar10 \
+  --stdp-params-file stdp_params.npz \
+  --device cuda \
+  --batch-size 256
+```
+
+`deterministic-rate` 编码是确定性的，评估时不需要重复采样。只有使用 `poisson` 编码时才建议设置
+`--eval-repeats` 对同一个样本做多次脉冲编码并平均 logits。
+如果显存不足，可以把 `--batch-size` 降到 `64`；如果训练太慢，可以先把 `--time-steps` 降到 `10` 做快速对比。
+
+当前最好结果：
+
+```text
+checkpoint=checkpoints/spiking_conv_stdp_deterministic/best.pt
+checkpoint_epoch=79
+encoding=deterministic-rate
+saved_test_acc=0.7735
+reeval_test_acc=0.7739
+```
+
+## 编码方式小批次对比
+
+编码方式对 SNN + STDP 影响很大。当前 checkpoint 证据显示，`deterministic-rate` 是主线：
+`checkpoints/spiking_conv_stdp_deterministic/best.pt` 在 epoch 79 达到约 `77.35%`，而同目录结构下
+`poisson` 的 `checkpoints/spiking_conv_stdp/best.pt` 只保存到约 `66.66%`。因此完整训练优先使用
+`deterministic-rate`，`poisson` 和 `latency` 只作为 ablation 参考。
+
+如果继续做快速实验，建议先固定学习率，不要在 15 个 epoch 内把 cosine 学习率衰减到 `1e-5`：
+
+```bash
+python train.py \
+  --data-root data/cifar10 \
+  --stdp-params-file stdp_params.npz \
+  --checkpoint-dir checkpoints/encoding_deterministic_fixed_lr \
+  --model-type spiking-conv-stdp \
+  --augment \
+  --stdp-pretrain \
+  --stdp-epochs 1 \
+  --epochs 30 \
+  --batch-size 128 \
+  --time-steps 12 \
+  --encoding deterministic-rate \
+  --eval-repeats 1 \
+  --hidden-size1 512 \
+  --hidden-size2 256 \
+  --conv-channels 96 \
+  --dropout 0.1 \
+  --lr 1e-3 \
+  --weight-decay 5e-4 \
+  --label-smoothing 0.05 \
+  --limit-train 10000 \
+  --limit-test 2000 \
+  --amp \
+  --device cuda
+```
+
+也建议在旧的稳定 `conv-stdp` 基线上试同一个 deterministic 编码，判断“编码改进”是否能直接抬高原来的
+`66%` 基线：
+
+```bash
+python train.py \
+  --data-root data/cifar10 \
+  --stdp-params-file stdp_params.npz \
+  --checkpoint-dir checkpoints/conv_stdp_deterministic_small \
+  --model-type conv-stdp \
+  --augment \
+  --stdp-pretrain \
+  --stdp-epochs 1 \
+  --epochs 30 \
+  --batch-size 128 \
+  --time-steps 12 \
+  --encoding deterministic-rate \
+  --eval-repeats 1 \
+  --hidden-size1 512 \
+  --hidden-size2 256 \
+  --conv-channels 96 \
+  --lr 1e-3 \
+  --weight-decay 5e-4 \
+  --label-smoothing 0.05 \
+  --limit-train 10000 \
+  --limit-test 2000 \
+  --amp \
+  --device cuda
+```
+
+下面三条命令保留作为编码 ablation，对比时除 `--encoding` 和 `--checkpoint-dir` 外保持一致。
+
+Poisson baseline：
+
+```bash
+python train.py \
+  --data-root data/cifar10 \
+  --stdp-params-file stdp_params.npz \
+  --checkpoint-dir checkpoints/encoding_poisson_small \
+  --model-type spiking-conv-stdp \
+  --augment \
+  --scheduler cosine \
+  --stdp-pretrain \
+  --stdp-epochs 1 \
+  --epochs 15 \
+  --batch-size 128 \
+  --time-steps 12 \
+  --encoding poisson \
+  --eval-repeats 1 \
+  --hidden-size1 512 \
+  --hidden-size2 256 \
+  --conv-channels 96 \
+  --dropout 0.1 \
+  --lr 1e-3 \
+  --min-lr 1e-5 \
+  --weight-decay 5e-4 \
+  --label-smoothing 0.05 \
+  --limit-train 10000 \
+  --limit-test 2000 \
+  --amp \
+  --device cuda
+```
+
+Deterministic rate：
+
+```bash
+python train.py \
+  --data-root data/cifar10 \
+  --stdp-params-file stdp_params.npz \
+  --checkpoint-dir checkpoints/encoding_deterministic_small \
+  --model-type spiking-conv-stdp \
+  --augment \
+  --scheduler cosine \
+  --stdp-pretrain \
+  --stdp-epochs 1 \
+  --epochs 15 \
+  --batch-size 128 \
+  --time-steps 12 \
+  --encoding deterministic-rate \
+  --eval-repeats 1 \
+  --hidden-size1 512 \
+  --hidden-size2 256 \
+  --conv-channels 96 \
+  --dropout 0.1 \
+  --lr 1e-3 \
+  --min-lr 1e-5 \
+  --weight-decay 5e-4 \
+  --label-smoothing 0.05 \
+  --limit-train 10000 \
+  --limit-test 2000 \
+  --amp \
+  --device cuda
+```
+
+Latency / TTFS：
+
+```bash
+python train.py \
+  --data-root data/cifar10 \
+  --stdp-params-file stdp_params.npz \
+  --checkpoint-dir checkpoints/encoding_latency_small \
+  --model-type spiking-conv-stdp \
+  --augment \
+  --scheduler cosine \
+  --stdp-pretrain \
+  --stdp-epochs 1 \
+  --epochs 15 \
+  --batch-size 128 \
+  --time-steps 12 \
+  --encoding latency \
+  --eval-repeats 1 \
+  --hidden-size1 512 \
+  --hidden-size2 256 \
+  --conv-channels 96 \
+  --dropout 0.1 \
+  --lr 1e-3 \
+  --min-lr 1e-5 \
+  --weight-decay 5e-4 \
+  --label-smoothing 0.05 \
+  --limit-train 10000 \
+  --limit-test 2000 \
+  --amp \
+  --device cuda
+```
+
+如果某个编码明显更快到达更高 `test_acc`，再去掉 `--limit-train/--limit-test` 做完整训练。
+
+## 非 SNN 参考上限
+
+`cifar-resnet` 是普通 ANN/ResNet 参考模型，不使用 Poisson 编码，也不是 STDP/SNN 模型。它可以用来确认
+数据集、增强和训练环境没有问题，但不应作为 SNN + STDP 分类任务的最终结果。
+
+```bash
+python train.py \
+  --data-root data/cifar10 \
+  --stdp-params-file stdp_params.npz \
+  --checkpoint-dir checkpoints/cifar_resnet \
+  --model-type cifar-resnet \
+  --epochs 200 \
+  --batch-size 128 \
+  --augment \
+  --auto-augment \
+  --random-erasing 0.25 \
+  --scheduler cosine \
+  --lr 3e-3 \
+  --min-lr 1e-5 \
+  --weight-decay 5e-4 \
+  --label-smoothing 0.1 \
+  --mixup-alpha 0.2 \
+  --resnet-width 64 \
+  --resnet-blocks 3 \
+  --dropout 0.1 \
+  --amp \
+  --device cuda
+```
+
+## STDP 基线训练
 
 推荐使用稳定的 `conv-stdp` 模型：
 
@@ -161,5 +412,6 @@ python infer.py \
 ## 说明
 
 - `mlp-stdp` 作为对照模型保留，但准确率大约在 `44%` 左右。
-- `conv-stdp` 是当前建议汇报和保留的稳定模型。
-- 本项目不再继续加入更大的实验模型；继续提升准确率需要额外的模型设计和训练实验。
+- `conv-stdp` 是旧的稳定 STDP/SNN 基线，准确率约为 `66%`。
+- `spiking-conv-stdp` 是当前建议继续调优和汇报的 SNN + STDP 主模型。
+- `cifar-resnet` 只适合做非 SNN 参考上限；它不是 STDP/SNN 模型。

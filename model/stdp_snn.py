@@ -4,6 +4,7 @@ import numpy as np
 import snntorch as snn
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 
@@ -163,6 +164,7 @@ class ConvLifModelSTDP(nn.Module):
         dt_ms: float = 1.0,
         stdp_lr: float = 1e-6,
         conv_channels: int = 96,
+        stdp_current_scale: float | None = None,
     ) -> None:
         super().__init__()
         if stdp_params is None:
@@ -199,6 +201,7 @@ class ConvLifModelSTDP(nn.Module):
             tau_minus=stdp_params["tau_minus"],
             dt_ms=dt_ms,
             lr_stdp=stdp_lr,
+            current_scale=stdp_current_scale,
         )
         self.lif1 = snn.Leaky(beta=beta, threshold=threshold)
         self.fc2 = nn.Linear(hidden_size1, hidden_size2)
@@ -239,6 +242,129 @@ class ConvLifModelSTDP(nn.Module):
                     post_trace=post_trace,
                 )
 
+            i2 = self.fc2(spk1)
+            spk2, mem2 = self.lif2(i2, mem2)
+            outputs.append(self.fc3(spk2))
+
+        return torch.stack(outputs, dim=1).mean(dim=1)
+
+
+class SpikingConvBlock(nn.Module):
+    """Conv-BN-LIF block that keeps membrane state across timesteps."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        beta: float,
+        threshold: float,
+        pool: bool = True,
+    ) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.lif = snn.Leaky(beta=beta, threshold=threshold)
+        self.pool = nn.MaxPool2d(2) if pool else nn.Identity()
+        self.out_channels = out_channels
+
+    def forward(self, x: Tensor, mem: Tensor) -> tuple[Tensor, Tensor]:
+        cur = self.bn(self.conv(x))
+        spk, mem = self.lif(cur, mem)
+        return self.pool(spk), mem
+
+
+class SpikingConvLifModelSTDP(nn.Module):
+    """Poisson-input convolutional SNN with a device-parameterized STDP synapse."""
+
+    def __init__(
+        self,
+        hidden_size1: int = 768,
+        hidden_size2: int = 384,
+        output_size: int = 10,
+        beta: float = 0.9,
+        threshold: float = 1.0,
+        stdp_params: dict[str, float] | None = None,
+        dt_ms: float = 1.0,
+        stdp_lr: float = 1e-6,
+        conv_channels: int = 128,
+        stdp_current_scale: float | None = None,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if stdp_params is None:
+            stdp_params = {
+                "A_plus": 80.0,
+                "tau_plus": 20.0,
+                "A_minus": -60.0,
+                "tau_minus": 20.0,
+            }
+
+        self.conv1 = SpikingConvBlock(3, 32, beta=beta, threshold=threshold)
+        self.conv2 = SpikingConvBlock(32, 64, beta=beta, threshold=threshold)
+        self.conv3 = SpikingConvBlock(64, conv_channels, beta=beta, threshold=threshold)
+        feature_size = conv_channels * 4 * 4
+        if stdp_current_scale is None:
+            stdp_current_scale = 1.0 / (feature_size**0.5)
+
+        self.stdp1 = STDPLayer(
+            feature_size,
+            hidden_size1,
+            A_plus=stdp_params["A_plus"],
+            tau_plus=stdp_params["tau_plus"],
+            A_minus=stdp_params["A_minus"],
+            tau_minus=stdp_params["tau_minus"],
+            dt_ms=dt_ms,
+            lr_stdp=stdp_lr,
+            current_scale=stdp_current_scale,
+        )
+        self.lif1 = snn.Leaky(beta=beta, threshold=threshold)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.fc2 = nn.Linear(hidden_size1, hidden_size2)
+        self.lif2 = snn.Leaky(beta=beta, threshold=threshold)
+        self.fc3 = nn.Linear(hidden_size2, output_size)
+
+        self.hidden_size1 = hidden_size1
+        self.hidden_size2 = hidden_size2
+        self.output_size = output_size
+        self.stdp_enabled = False
+
+    def set_stdp(self, enabled: bool, lr_stdp: float | None = None) -> None:
+        self.stdp_enabled = enabled
+        if lr_stdp is not None:
+            self.stdp1.lr_stdp = float(lr_stdp)
+
+    def forward(self, x: Tensor) -> Tensor:
+        batch_size, time_steps, _ = x.shape
+        device = x.device
+
+        mem_c1 = torch.zeros(batch_size, 32, 32, 32, device=device)
+        mem_c2 = torch.zeros(batch_size, 64, 16, 16, device=device)
+        mem_c3 = torch.zeros(batch_size, self.conv3.out_channels, 8, 8, device=device)
+        mem1 = torch.zeros(batch_size, self.hidden_size1, device=device)
+        mem2 = torch.zeros(batch_size, self.hidden_size2, device=device)
+        pre_trace = torch.zeros(batch_size, self.stdp1.in_features, device=device)
+        post_trace = torch.zeros(batch_size, self.stdp1.out_features, device=device)
+
+        outputs = []
+        for t in range(time_steps):
+            xt = x[:, t, :].view(batch_size, 3, 32, 32)
+            spk, mem_c1 = self.conv1(xt, mem_c1)
+            spk, mem_c2 = self.conv2(spk, mem_c2)
+            spk, mem_c3 = self.conv3(spk, mem_c3)
+            features = F.adaptive_max_pool2d(spk, (4, 4)).flatten(1)
+
+            i1 = self.stdp1(features)
+            spk1, mem1 = self.lif1(i1, mem1)
+
+            if self.stdp_enabled:
+                pre_trace, post_trace = self.stdp1.update_stdp(
+                    pre_spike=features > 0,
+                    post_spike=spk1,
+                    pre_trace=pre_trace,
+                    post_trace=post_trace,
+                )
+
+            spk1 = self.dropout(spk1)
             i2 = self.fc2(spk1)
             spk2, mem2 = self.lif2(i2, mem2)
             outputs.append(self.fc3(spk2))

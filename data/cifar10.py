@@ -9,6 +9,8 @@ from torchvision import datasets, transforms
 
 CIFAR10_INPUT_SIZE = 3 * 32 * 32
 CIFAR10_CLASSES = 10
+CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
+CIFAR10_STD = (0.2470, 0.2435, 0.2616)
 
 
 def build_cifar10_loaders(
@@ -17,20 +19,33 @@ def build_cifar10_loaders(
     num_workers: int,
     download: bool,
     augment: bool = False,
+    normalize: bool = False,
+    auto_augment: bool = False,
+    random_erasing: float = 0.0,
     limit_train: int | None = None,
     limit_test: int | None = None,
 ) -> tuple[DataLoader, DataLoader]:
+    train_steps: list[transforms.Transform] = []
     if augment:
-        train_transform = transforms.Compose(
+        train_steps.extend(
             [
                 transforms.RandomCrop(32, padding=4),
                 transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
             ]
         )
-    else:
-        train_transform = transforms.ToTensor()
-    test_transform = transforms.ToTensor()
+    if auto_augment:
+        train_steps.append(transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10))
+    train_steps.append(transforms.ToTensor())
+    if normalize:
+        train_steps.append(transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD))
+    if random_erasing > 0:
+        train_steps.append(transforms.RandomErasing(p=random_erasing))
+    train_transform = transforms.Compose(train_steps)
+
+    test_steps: list[transforms.Transform] = [transforms.ToTensor()]
+    if normalize:
+        test_steps.append(transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD))
+    test_transform = transforms.Compose(test_steps)
     data_root = Path(data_root)
 
     try:

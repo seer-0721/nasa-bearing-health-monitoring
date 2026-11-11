@@ -1,0 +1,20 @@
+[
+  {
+    "dataset": "nasa",
+    "health_regression_accuracy": 1.0,
+    "fault_macro_accuracy": 1.0,
+    "primary_task": "health"
+  },
+  {
+    "dataset": "cwru",
+    "health_regression_accuracy": 0.9885386819484241,
+    "fault_macro_accuracy": 1.0,
+    "primary_task": "fault"
+  },
+  {
+    "dataset": "paderborn",
+    "health_regression_accuracy": 0.9942933870426317,
+    "fault_macro_accuracy": 1.0,
+    "primary_task": "fault"
+  }
+]

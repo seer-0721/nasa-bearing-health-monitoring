@@ -1,0 +1,86 @@
+{
+  "dataset": "nasa",
+  "data_root": "data/NasaBearingDataset",
+  "sample_layout": "per_bearing",
+  "health_task": "continuous_score_regression",
+  "max_train_samples": 8000,
+  "max_val_samples": 2000,
+  "best": {
+    "config": {
+      "input_size": 24,
+      "hidden_size": 256,
+      "time_steps": 6,
+      "beta": 0.85,
+      "threshold": 0.65,
+      "input_scale": 1.0,
+      "stdp_lr": 1e-07,
+      "stdp_ltd_scale": 0.2,
+      "w_min": 0.0,
+      "w_max": 1.0,
+      "include_raw": true,
+      "seed": 42
+    },
+    "stdp_epochs": 1,
+    "stdp_params": {
+      "A_plus": 1337.8752754605443,
+      "tau_plus": 4999.999999999999,
+      "A_minus": -249.97810343719524,
+      "tau_minus": 4999.999999999999
+    },
+    "max_train_samples": 8000,
+    "max_val_samples": 2000,
+    "health": {
+      "alpha": 0.001,
+      "head": "balanced_ridge_regression",
+      "mae": 0.012057587289541413,
+      "mse": 0.00041035490886163556,
+      "accuracy_at_tolerance": 0.999,
+      "tolerance": 0.1
+    },
+    "fault": {
+      "alpha": 0.001,
+      "accuracy": 1.0,
+      "macro_accuracy": 1.0
+    }
+  },
+  "trials": [
+    {
+      "config": {
+        "input_size": 24,
+        "hidden_size": 256,
+        "time_steps": 6,
+        "beta": 0.85,
+        "threshold": 0.65,
+        "input_scale": 1.0,
+        "stdp_lr": 1e-07,
+        "stdp_ltd_scale": 0.2,
+        "w_min": 0.0,
+        "w_max": 1.0,
+        "include_raw": true,
+        "seed": 42
+      },
+      "stdp_epochs": 1,
+      "stdp_params": {
+        "A_plus": 1337.8752754605443,
+        "tau_plus": 4999.999999999999,
+        "A_minus": -249.97810343719524,
+        "tau_minus": 4999.999999999999
+      },
+      "max_train_samples": 8000,
+      "max_val_samples": 2000,
+      "health": {
+        "alpha": 0.001,
+        "head": "balanced_ridge_regression",
+        "mae": 0.012057587289541413,
+        "mse": 0.00041035490886163556,
+        "accuracy_at_tolerance": 0.999,
+        "tolerance": 0.1
+      },
+      "fault": {
+        "alpha": 0.001,
+        "accuracy": 1.0,
+        "macro_accuracy": 1.0
+      }
+    }
+  ]
+}

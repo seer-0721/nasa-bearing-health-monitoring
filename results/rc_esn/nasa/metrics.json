@@ -1,0 +1,106 @@
+{
+  "dataset": "nasa",
+  "data_root": "data/NasaBearingDataset",
+  "sample_layout": "per_bearing",
+  "max_train_samples": 50000,
+  "max_val_samples": 10000,
+  "primary_task": "health",
+  "best": {
+    "config": {
+      "input_dim": 20,
+      "reservoir_size": 800,
+      "spectral_radius": 0.9,
+      "leaking_rate": 0.3,
+      "input_scale": 0.5,
+      "density": 0.05,
+      "include_raw": true,
+      "seed": 44
+    },
+    "max_train_samples": 50000,
+    "max_val_samples": 10000,
+    "health": {
+      "alpha": 0.0001,
+      "mse": 8.289919250799527e-06,
+      "regression_accuracy": 1.0
+    },
+    "fault": {
+      "alpha": 0.0001,
+      "accuracy": 1.0,
+      "macro_accuracy": 1.0
+    }
+  },
+  "trials": [
+    {
+      "config": {
+        "input_dim": 20,
+        "reservoir_size": 800,
+        "spectral_radius": 0.9,
+        "leaking_rate": 0.3,
+        "input_scale": 0.5,
+        "density": 0.05,
+        "include_raw": true,
+        "seed": 42
+      },
+      "max_train_samples": 50000,
+      "max_val_samples": 10000,
+      "health": {
+        "alpha": 0.01,
+        "mse": 2.6481070387022175e-05,
+        "regression_accuracy": 0.9999
+      },
+      "fault": {
+        "alpha": 0.1,
+        "accuracy": 0.9999,
+        "macro_accuracy": 0.999964223104719
+      }
+    },
+    {
+      "config": {
+        "input_dim": 20,
+        "reservoir_size": 800,
+        "spectral_radius": 0.9,
+        "leaking_rate": 0.3,
+        "input_scale": 0.5,
+        "density": 0.05,
+        "include_raw": true,
+        "seed": 43
+      },
+      "max_train_samples": 50000,
+      "max_val_samples": 10000,
+      "health": {
+        "alpha": 1.0,
+        "mse": 3.0266459026375664e-05,
+        "regression_accuracy": 0.9998
+      },
+      "fault": {
+        "alpha": 0.1,
+        "accuracy": 1.0,
+        "macro_accuracy": 1.0
+      }
+    },
+    {
+      "config": {
+        "input_dim": 20,
+        "reservoir_size": 800,
+        "spectral_radius": 0.9,
+        "leaking_rate": 0.3,
+        "input_scale": 0.5,
+        "density": 0.05,
+        "include_raw": true,
+        "seed": 44
+      },
+      "max_train_samples": 50000,
+      "max_val_samples": 10000,
+      "health": {
+        "alpha": 0.0001,
+        "mse": 8.289919250799527e-06,
+        "regression_accuracy": 1.0
+      },
+      "fault": {
+        "alpha": 0.0001,
+        "accuracy": 1.0,
+        "macro_accuracy": 1.0
+      }
+    }
+  ]
+}

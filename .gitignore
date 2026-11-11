@@ -1,8 +1,42 @@
+# ---- datasets: never committed (NASA/CWRU/Paderborn 原始与转换数据，约 6.5G) ----
+data/*
+!data/__init__.py
+!data/nasa_bearing.py
+
+# ---- trained weights / checkpoints ----
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# ---- generated feature tables & exports ----
+exports/
+
+# ---- large numeric artifacts inside results/ (keep the JSON metrics) ----
+*.pkl
+*.npz
+*.h5
+*.hdf5
+*.npy
+# 例外：器件实验拟合出的 STDP 参数（4K，训练必需，否则脚本直接报错）
+!stdp_params.npz
+!testCNN/SNN/stdp_params.npz
+
+# ---- internal working artifacts ----
+logs/
+.agents/
+handoff_site/
+
+# ---- python ----
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
+venv/
+.ipynb_checkpoints/
 
-data/cifar10/
-data/cifar-10-batches-py/
-checkpoints/
-*.pt
+# ---- report / office artifacts ----
+*.pptx
+*.pdf
+~$*

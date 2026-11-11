@@ -1,0 +1,23 @@
+[
+  {
+    "dataset": "nasa",
+    "health_accuracy_at_tolerance": 0.999,
+    "health_mae": 0.012057587289541413,
+    "fault_macro_accuracy": 1.0,
+    "target_met": true
+  },
+  {
+    "dataset": "cwru",
+    "health_accuracy_at_tolerance": 0.9925,
+    "health_mae": 0.002125,
+    "fault_macro_accuracy": 0.9967876019728074,
+    "target_met": true
+  },
+  {
+    "dataset": "paderborn",
+    "health_accuracy_at_tolerance": 0.999,
+    "health_mae": 0.001,
+    "fault_macro_accuracy": 0.9995009980039921,
+    "target_met": true
+  }
+]

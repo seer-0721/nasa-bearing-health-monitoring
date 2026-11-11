@@ -1,0 +1,66 @@
+{
+  "dataset": "cwru",
+  "data_root": "data/CWRU/converted_full",
+  "sample_layout": "row",
+  "health_task": "continuous_score_regression",
+  "max_train_samples": 50000,
+  "max_val_samples": 10000,
+  "best": {
+    "config": {
+      "input_size": 80,
+      "hidden_size": 256,
+      "time_steps": 6,
+      "beta": 0.85,
+      "threshold": 0.65,
+      "input_scale": 1.0,
+      "recurrent_scale": 0.9,
+      "recurrent_density": 0.05,
+      "include_raw": true,
+      "seed": 42
+    },
+    "max_train_samples": 50000,
+    "max_val_samples": 10000,
+    "health": {
+      "alpha": 0.001,
+      "mae": 0.06271779849322764,
+      "mse": 0.006679569720376481,
+      "accuracy_at_tolerance": 0.789971346704871,
+      "tolerance": 0.1
+    },
+    "fault": {
+      "alpha": 0.001,
+      "accuracy": 0.9799426934097422,
+      "macro_accuracy": 0.9857127213236693
+    }
+  },
+  "trials": [
+    {
+      "config": {
+        "input_size": 80,
+        "hidden_size": 256,
+        "time_steps": 6,
+        "beta": 0.85,
+        "threshold": 0.65,
+        "input_scale": 1.0,
+        "recurrent_scale": 0.9,
+        "recurrent_density": 0.05,
+        "include_raw": true,
+        "seed": 42
+      },
+      "max_train_samples": 50000,
+      "max_val_samples": 10000,
+      "health": {
+        "alpha": 0.001,
+        "mae": 0.06271779849322764,
+        "mse": 0.006679569720376481,
+        "accuracy_at_tolerance": 0.789971346704871,
+        "tolerance": 0.1
+      },
+      "fault": {
+        "alpha": 0.001,
+        "accuracy": 0.9799426934097422,
+        "macro_accuracy": 0.9857127213236693
+      }
+    }
+  ]
+}

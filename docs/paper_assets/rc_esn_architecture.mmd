@@ -1,0 +1,7 @@
+flowchart LR
+    X[Normalized bearing features] --> Q[Segmented pseudo sequence]
+    Q --> E[Fixed sparse ESN reservoir]
+    E --> F[Final, mean and variance states]
+    F --> R[Raw feature concatenation]
+    R --> H[Health-score regression]
+    R --> C[Fault-part classification]

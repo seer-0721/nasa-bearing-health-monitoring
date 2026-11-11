@@ -1,0 +1,14 @@
+{
+  "markdown": "docs/stdp_snn_rc_esn_academic_report.md",
+  "pptx": "docs/stdp_snn_rc_esn_academic_report.pptx",
+  "figures": {
+    "Dataset size": "docs/paper_assets/fig_dataset_counts.png",
+    "Health distribution": "docs/paper_assets/fig_health_distribution.png",
+    "Primary joint accuracy": "docs/paper_assets/fig_primary_joint_accuracy.png",
+    "Tolerance sensitivity": "docs/paper_assets/fig_tolerance_sensitivity.png",
+    "Health MAE": "docs/paper_assets/fig_health_mae.png",
+    "Fault macro": "docs/paper_assets/fig_fault_macro.png",
+    "Health scatter": "docs/paper_assets/fig_health_scatter.png",
+    "Error histogram": "docs/paper_assets/fig_health_error_hist.png"
+  }
+}

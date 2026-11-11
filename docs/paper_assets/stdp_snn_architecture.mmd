@@ -1,0 +1,8 @@
+flowchart LR
+    X[Normalized bearing features] --> R[Rate spike encoder]
+    R --> S[Single STDP synapse layer]
+    S --> L[LIF postsynaptic neurons]
+    L --> F[Spike and membrane statistics]
+    F --> A[Readout feature augmentation]
+    A --> H[Health-score regression]
+    A --> C[Fault-part classification]

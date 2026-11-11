@@ -3,152 +3,148 @@ from __future__ import annotations
 import argparse
 
 import torch
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 
-from data import (
-    CIFAR10_CLASSES,
-    CIFAR10_INPUT_SIZE,
-    CIFAR10_MEAN,
-    CIFAR10_STD,
-    encode_spikes,
-)
-from model import CifarResNet, ConvLifModelSTDP, LifModelSTDP, SpikingConvLifModelSTDP
-from utils import load_checkpoint, load_stdp_params, resolve_device
-
-
-CIFAR10_LABELS = (
-    "airplane",
-    "automobile",
-    "bird",
-    "cat",
-    "deer",
-    "dog",
-    "frog",
-    "horse",
-    "ship",
-    "truck",
-)
+from data import DEFAULT_FAULT_MAP, NASA_BEARING_FAULT_PARTS, build_nasa_bearing_loaders
+from eval import build_model
+from utils import load_checkpoint, resolve_device, set_seed
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run CIFAR-10 inference from a checkpoint.")
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/best.pt")
-    parser.add_argument("--data-root", type=str, default="data/cifar10")
+    parser = argparse.ArgumentParser(description="Run NASA Bearing STDP/SNN inference.")
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/nasa_bearing_snn/best.pt")
+    parser.add_argument("--data-root", type=str, default="data/NasaBearingDataset")
     parser.add_argument("--stdp-params-file", type=str, default="stdp_params.npz")
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--time-steps", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--limit", type=int, default=20)
     parser.add_argument(
-        "--encoding",
+        "--sample-mode",
         type=str,
-        default=None,
-        choices=["poisson", "deterministic-rate", "latency"],
+        default="first",
+        choices=["first", "balanced", "errors"],
+        help="first prints loader order; balanced prints a few samples per target fault class; errors prints mistakes first.",
     )
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--health-error-threshold", type=float, default=0.1)
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
+
+
+def collect_predictions(
+    model,
+    loader,
+    device: torch.device,
+    health_bins: int,
+    health_error_threshold: float,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    with torch.no_grad():
+        for batch in loader:
+            features = batch["features"].to(device, non_blocking=True)
+            outputs = model(features)
+            fault_probs = outputs["fault_logits"].softmax(dim=1)
+            health_score_preds = torch.round(
+                (1.0 - outputs["health_score_pred"]) * (health_bins - 1)
+            ).long()
+            health_score_preds = health_score_preds.clamp(0, health_bins - 1)
+            fault_preds = fault_probs.argmax(dim=1)
+            health_expected = outputs["health_score_pred"]
+
+            for idx in range(features.shape[0]):
+                health_class = int(health_score_preds[idx].item())
+                fault_class = int(fault_preds[idx].item())
+                target_health_class = int(batch["health_label"][idx].item())
+                target_fault_class = int(batch["fault_part_label"][idx].item())
+                pred_health_score = float(health_expected[idx].item())
+                target_health_score = float(batch["health_score"][idx].item())
+                health_score_abs_error = abs(pred_health_score - target_health_score)
+                is_health_error = health_score_abs_error > health_error_threshold
+                rows.append(
+                    {
+                        "bearing_index": int(batch["bearing_index"][idx].item()),
+                        "source": "fault" if int(batch["source_is_fault"][idx].item()) else "good",
+                        "source_position": int(batch["source_position"][idx].item()),
+                        "pred_health_score": pred_health_score,
+                        "pred_health_class_from_score": int(health_score_preds[idx].item()),
+                        "target_health_score": target_health_score,
+                        "health_score_abs_error": health_score_abs_error,
+                        "target_health_class": target_health_class,
+                        "pred_fault_class": fault_class,
+                        "pred_fault_conf": float(fault_probs[idx, fault_class].item()),
+                        "target_fault_class": target_fault_class,
+                        "is_error": is_health_error or fault_class != target_fault_class,
+                    }
+                )
+    return rows
+
+
+def choose_rows(rows: list[dict[str, object]], sample_mode: str, limit: int) -> list[dict[str, object]]:
+    if sample_mode == "errors":
+        selected = [row for row in rows if row["is_error"]]
+        return selected[:limit]
+    if sample_mode == "balanced":
+        selected: list[dict[str, object]] = []
+        per_class_limit = max(1, limit // len(NASA_BEARING_FAULT_PARTS))
+        for class_index in range(len(NASA_BEARING_FAULT_PARTS)):
+            class_rows = [
+                row for row in rows if int(row["target_fault_class"]) == class_index
+            ]
+            selected.extend(class_rows[:per_class_limit])
+        if len(selected) < limit:
+            selected.extend(row for row in rows if row not in selected)
+        return selected[:limit]
+    return rows[:limit]
+
+
+def print_row(row: dict[str, object]) -> None:
+    fault_class = int(row["pred_fault_class"])
+    target_fault_class = int(row["target_fault_class"])
+    print(
+        f"B{row['bearing_index']} "
+        f"source={row['source']} "
+        f"pos={row['source_position']} "
+        f"pred_health_score={float(row['pred_health_score']):.3f} "
+        f"pred_health_class_from_score={row['pred_health_class_from_score']} "
+        f"target_health_score={float(row['target_health_score']):.3f} "
+        f"health_score_abs_error={float(row['health_score_abs_error']):.3f} "
+        f"target_health_class={row['target_health_class']} "
+        f"fault_part={NASA_BEARING_FAULT_PARTS[fault_class]} "
+        f"fault_conf={float(row['pred_fault_conf']):.3f} "
+        f"target_fault_part={NASA_BEARING_FAULT_PARTS[target_fault_class]}"
+    )
 
 
 def main() -> None:
     args = parse_args()
+    set_seed(args.seed)
     device = resolve_device(args.device)
     checkpoint = load_checkpoint(args.checkpoint, map_location=device)
     train_args = checkpoint.get("args", {})
-    time_steps = args.time_steps or train_args.get("time_steps", 10)
-    encoding = args.encoding or train_args.get("encoding", "poisson")
-
-    stdp_params = load_stdp_params(args.stdp_params_file)
-    model_type = train_args.get("model_type", "mlp-stdp")
-    if model_type == "cifar-resnet":
-        model = CifarResNet(
-            num_classes=CIFAR10_CLASSES,
-            width=train_args.get("resnet_width", 64),
-            blocks_per_stage=train_args.get("resnet_blocks", 3),
-            dropout=train_args.get("dropout", 0.0),
-        ).to(device)
-    elif model_type == "conv-stdp":
-        model = ConvLifModelSTDP(
-            hidden_size1=train_args.get("hidden_size1", 256),
-            hidden_size2=train_args.get("hidden_size2", 128),
-            output_size=CIFAR10_CLASSES,
-            beta=train_args.get("beta", 0.9),
-            threshold=train_args.get("threshold", 1.0),
-            stdp_params=stdp_params,
-            stdp_lr=train_args.get("stdp_lr", 1e-6),
-            conv_channels=train_args.get("conv_channels", 96),
-            stdp_current_scale=train_args.get("stdp_current_scale"),
-            stdp_ltd_scale=train_args.get("stdp_ltd_scale", 1.0),
-        ).to(device)
-    elif model_type == "spiking-conv-stdp":
-        model = SpikingConvLifModelSTDP(
-            hidden_size1=train_args.get("hidden_size1", 768),
-            hidden_size2=train_args.get("hidden_size2", 384),
-            output_size=CIFAR10_CLASSES,
-            beta=train_args.get("beta", 0.9),
-            threshold=train_args.get("threshold", 1.0),
-            stdp_params=stdp_params,
-            stdp_lr=train_args.get("stdp_lr", 1e-6),
-            conv_channels=train_args.get("conv_channels", 128),
-            conv_blocks_per_stage=train_args.get("conv_blocks_per_stage", 1),
-            stdp_current_scale=train_args.get("stdp_current_scale"),
-            stdp_ltd_scale=train_args.get("stdp_ltd_scale", 1.0),
-            dropout=train_args.get("dropout", 0.0),
-            readout=train_args.get("readout", "spike"),
-            wta_k=train_args.get("wta_k", 0),
-            adaptive_threshold_scale=train_args.get("adaptive_threshold_scale", 0.0),
-            adaptive_threshold_decay=train_args.get("adaptive_threshold_decay", 0.9),
-        ).to(device)
-    else:
-        model = LifModelSTDP(
-            input_size=CIFAR10_INPUT_SIZE,
-            hidden_size1=train_args.get("hidden_size1", 256),
-            hidden_size2=train_args.get("hidden_size2", 128),
-            output_size=CIFAR10_CLASSES,
-            beta=train_args.get("beta", 0.9),
-            threshold=train_args.get("threshold", 1.0),
-            stdp_params=stdp_params,
-            stdp_lr=train_args.get("stdp_lr", 1e-6),
-        ).to(device)
-    model.load_state_dict(checkpoint["model"])
-    model.eval()
-
-    transform_steps: list[transforms.Transform] = [transforms.ToTensor()]
-    if model_type == "cifar-resnet":
-        transform_steps.append(transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD))
-    dataset = datasets.CIFAR10(
-        root=args.data_root,
-        train=False,
-        transform=transforms.Compose(transform_steps),
-        download=False,
-    )
-    loader = DataLoader(
-        dataset,
+    _, loader, input_size = build_nasa_bearing_loaders(
+        data_root=args.data_root,
         batch_size=args.batch_size,
-        shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=torch.cuda.is_available(),
+        health_bins=train_args.get("health_bins", 11),
+        health_label_mode=train_args.get("health_label_mode", "time"),
+        fault_map=train_args.get("fault_map", DEFAULT_FAULT_MAP),
+        include_bearing_id=train_args.get("include_bearing_id", False),
+        sample_layout=train_args.get("sample_layout", "per_bearing"),
+        val_fraction=train_args.get("val_fraction", 0.2),
+        limit_good=train_args.get("limit_good"),
+        limit_fault=train_args.get("limit_fault"),
+        seed=train_args.get("seed", args.seed),
     )
+    model = build_model(checkpoint, input_size, args.stdp_params_file, device)
 
-    seen = 0
-    correct = 0
-    with torch.no_grad():
-        for images, labels in loader:
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-            if model_type in {"mlp-stdp", "conv-stdp", "spiking-conv-stdp"}:
-                logits = model(encode_spikes(images, time_steps, encoding))
-            else:
-                logits = model(images)
-            preds = logits.argmax(dim=1)
-
-            for pred, target in zip(preds.cpu().tolist(), labels.cpu().tolist()):
-                print(f"pred={CIFAR10_LABELS[pred]} target={CIFAR10_LABELS[target]}")
-                correct += int(pred == target)
-                seen += 1
-                if seen >= args.limit:
-                    print(f"shown_acc={correct / seen:.4f}")
-                    return
+    rows = collect_predictions(
+        model,
+        loader,
+        device,
+        health_bins=train_args.get("health_bins", 11),
+        health_error_threshold=args.health_error_threshold,
+    )
+    for row in choose_rows(rows, args.sample_mode, args.limit):
+        print_row(row)
 
 
 if __name__ == "__main__":
